@@ -1,0 +1,201 @@
+---
+title: '*Heroes of the Storm* Balance Analysis'
+author: "Gavin Moss"
+date: "March 4, 2017"
+output: pdf_document
+---
+
+# Introduction
+Is *Heroes of the Storm* balanced? Are there some characters that win significantly more often at all skill levels? Does Skill level or hero selection matter more in determening who wins a game? These are questions that many compedative players ask. In this document I will take a numerical approach to answer those questions using machine learning.
+
+# What is *Heroes of the Storm*
+Heroes of the storm is a Multiplayer Online Battle Arena (MOBA) where two teams of five players take control of diffrent characters in order to destroy the oposing team's base. Each character has diffrent abilities and characteristics. Such as how much damage they can receive before dying and having to wait to join the game again, and how much damage they can deal out. The game tries to help players have competative games and shoots for any given player to win 50% of their games.
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{R , include = FALSE}
+lapply(c("data.table","magrittr","h2o"),require, character.only = TRUE) 
+h2o.init(nthreads = -1, max_mem_size = "10g")
+#load dataframes
+replays <- h2o.importFile("/Users/Moss/Documents/MSBA/Hots project/HOTSLogs Data Export Current/Replays.csv")
+  replays[["GameMode(3=Quick Match 4=Hero League 5=Team League 6=Unranked Draft)"]] %<>%   as.factor()
+
+Characters <- h2o.importFile("/Users/Moss/Documents/MSBA/Hots project/HOTSLogs Data Export Current/ReplayCharacters.csv")
+  #Transform Characters
+  Characters[["HeroID"]] %<>% as.factor()
+  #replace NA values with mean
+  Characters[is.na(Characters[["MMR Before"]]),6] <-mean(Characters[!is.na(Characters[["MMR Before"]]),6])
+  #Standardize based on Max MRR
+  Characters[["MMR standardized"]] <- (Characters[["MMR Before"]] - min(Characters[["MMR Before"]])) /(h2o.max(Characters[["MMR Before"]]) - min(Characters[["MMR Before"]]) )
+
+
+ids <- h2o.importFile("/Users/Moss/Documents/MSBA/Hots project/HOTSLogs Data Export Current/HeroIdAndMapID.csv")
+ids$ID_Length <- h2o.nchar(h2o.ascharacter(ids$ID))
+heroids <- as.h2o(ids[ids$ID_Length !=4,])
+heroids[["ID"]] %<>% as.factor()
+
+#merge modified tables
+Characters <- h2o.merge(Characters,heroids,by.x= "HeroID", by.y = "ID", all.x = TRUE)
+Characters[["Name"]] %<>% as.factor()
+Characters <- h2o.merge(Characters,replays,by.x= "ReplayID", by.y = "ReplayID", all.x = TRUE)
+Characters[["Name"]] %<>% as.factor()
+
+#this is for creating ggplot graphs.
+graphs <-as.data.frame(Characters[,c(4,6)])
+
+```
+# The Data
+The data used in this analysis comes from HotsLogs.com and can be found at https://www.hotslogs.com/Info/API. The data used in the analysis was downloaded on 3/2/2017 and has data up through 2/26/2017.
+
+Hots logs gathers this data through voluntary submissions of replay files. Each replay file has data for all 10 players in that game. This includes What hero people played, what level that hero is for the player (an indication of overall time spent playing a specific hero),and an estimated MMR ranking for an individual and more.
+
+The data used in the analysis was downloaded on 3/2/2017 and has data up though 2/26/2017, and has 23,242,890 records. Of particular note the data has an even split of 11,621,445 records of wins, and 11,621,445 of losses, with all characters being played between 70,736 and 928,234 times.
+
+
+There is a nice distribution of players at diffrent skill ratings (MMR), and  uising heroes at diffrent varying levels.
+
+```{R}
+hist(graphs$MMR.Before, main = "Distribution of MMR Ratings", xlab = "MMR Rating")
+hist(graphs$Hero.Level, main = "Distribution of Hero level", xlab = "Hero Level")
+```
+
+# The analysis
+To answer the questions of is the game balanced, and what matters more for determining winning: Skill level or hero selection, We need to see what effect each Character has on a player's chance of winning a game, as well as what effect their skill has.
+
+To measure a player's skill, I am going to use two variables. The first is the player's MMR before the game started. MMR is a skill rating given to a player by the game to assist in the match making process, and as such is a good approximator for the player's over all skill at the game. As the exact MMR is a number on an abitrary scale I  standardize this data point using Min Max standardization. In some cases the MMR value is blank; this is due to a lack of games played. As there is no way of knowing how skilled that player is at competative MOBA Games I have set all null MMR Values to the median MMR Value. 
+
+As Players may or may not be equaly skilled with every character in the game I will be using Hero Level to measure how skilled a player is with a given character. This is not a perfect measure however as players gain levels with a character based of the number of games they have played with that character, not on how good they are with them. However I belive that it is reasonable to assume as a player spends more time playing a character they will also become more skilled with that character.
+
+I use a logistig regression algorithem to isolate the effect of these variables from one another and to build a predictive model for who will win and lose any given game. It is important to note that if any sort of accurate prediction can be made as to who will win a game then the game is not balanced properly.
+
+```{R Split the data, include= FALSE}
+Char_split <- h2o.splitFrame(Characters, ratios = .85, destination_frames = c("train_char","test_char"), seed = 444)
+train_char <- Char_split[[1]]
+test_char <- Char_split[[2]]
+# creat general logit regression for all games
+```
+# Create base logistic model
+```{R Creat general model and test it, results = "hide"}
+Char_v_skill <- h2o.glm(
+  x=c("Name","Hero Level", "MMR standardized"),
+  y="Is Winner",
+  training_frame = train_char,
+  validation_frame = test_char,
+  family="binomial"
+)
+```
+```{r}
+#summarize model and its preformance
+summary(Char_v_skill)
+```
+Looking at the summary of our model we can see that this model has almost no predictive power. With an "Area under the Curve" rating of just .53 and a mean error rate of.499 we see that this model can predict a win no better than a coin flip.
+
+However, the variable importance and predected win probability for each data point can still give us insights into the overall game balance of Heros of the Storm. Below we see a ranking of what data points effect our prediction the most. Orannge bars indicate that the data point reduces a playrs change of wining, and a blue bar indicates that it increases a playrs chance to win.
+
+``` {r, fig.width =8, fig.height = 11}
+h2o.varimp_plot(Char_v_skill)
+```
+  
+Below is a list of data points and how much they affect a player's chance of wining in descending order.
+
+``` {r}
+char_v_skill_prob <- exp(h2o.coef(Char_v_skill))/(exp(h2o.coef(Char_v_skill))+1)-.5
+sort(char_v_skill_prob,decreasing = TRUE)
+```
+
+# Adjust model to improve predictive power
+As the base model had little predictive power lets try to tune it to increase its power. To do this, I employ a grid serch testing different coeffeicent penalty methods ranging from a pure ridge regression to a pure lasso regression.
+
+```{R Model adjustments, results = "hide"}
+hyper_parameters <- list(alpha = c(0,.2,.4,.6,.8,1))
+#Creat lasso logit regression for all games
+char_v_skill_grid <- h2o.grid(
+    algorithm = "glm",
+    grid_id = "char_v_skill",
+    hyper_params= hyper_parameters,
+    training_frame = train_char,
+    validation_frame = test_char,
+    x=c("Name","Hero Level", "MMR standardized"),
+    y="Is Winner",
+    lambda_search = TRUE,
+    family = "binomial"
+)
+```
+```{R}
+glm.sorted.grid <- h2o.getGrid("char_v_skill","auc")
+best_model <- h2o.getModel(glm.sorted.grid@model_ids[[1]])
+best_model
+```
+Our best tuned model using a penatly factor turns out to have less predictive power than the base model, lending more credance to the idea that we cannot build an accurate predictive model. Of note however, is that when using a penalty factor on our variables to make sure the effects on a players win rate were significant, all but our MMR and Hero Level data points drop out of the model. This suggests that player skill, not certain characters, wins games.
+
+```{R, fig.width =8, fig.height = 11}
+h2o.varimp_plot(best_model)
+char_v_skill_grid_prob <- exp(h2o.coef(best_model))/(exp(h2o.coef(best_model))+1)-.5
+sort(char_v_skill_grid_prob,decreasing = TRUE)
+```
+
+# Do we get the same results when casual games are removed
+As game balance is most important for competitive games I will recreate the same models as above but for only games played competitively. 
+```{R glm model for compedative play, results = "hide" }
+Char_split_comp <- h2o.splitFrame(Characters[Characters[["GameMode(3=Quick Match 4=Hero League 5=Team League 6=Unranked Draft)"]] %in% c("4","5"),],
+ratios = .85, 
+destination_frames = c("train_char","test_char"),
+seed = 444)
+
+train_char <- Char_split_comp[[1]]
+test_char <- Char_split_comp[[2]]
+
+Char_v_skill_comp <- h2o.glm(
+    x=c("Name","Hero Level", "MMR standardized"),
+    y="Is Winner",
+    training_frame = train_char,
+    validation_frame = test_char,
+    family="binomial"
+)
+```
+```{r}
+Char_v_skill_comp
+```
+
+Again, the base model gives us an AUC of just .53
+
+```{r, fig.width =8, fig.height = 11}
+h2o.varimp_plot(Char_v_skill_comp)
+comp_prob <- exp(h2o.coef(Char_v_skill))/(exp(h2o.coef(Char_v_skill))+1)-.5
+sort(comp_prob,decreasing = TRUE)
+```
+
+The Variable importance and probabilities are about the same as for our model using all games played, with some differences in character ordering.
+
+``` {r, results = "hide"}
+
+comp_grid <- h2o.grid(
+    algorithm = "glm",
+    grid_id = "comp_grid",
+    hyper_params= hyper_parameters,
+    training_frame = train_char,
+    validation_frame = test_char,
+    x=c("Name","Hero Level", "MMR standardized"),
+    y="Is Winner",
+    lambda_search = TRUE,
+    family = "binomial"
+)
+```
+```{r, fig.width =8, fig.height = 11}
+glm.sorted.grid <- h2o.getGrid("comp_grid","auc")
+best_model <- h2o.getModel(glm.sorted.grid@model_ids[[1]])
+best_model
+
+h2o.varimp_plot(best_model)
+comp_grid_prob <- exp(h2o.coef(best_model))/(exp(h2o.coef(best_model))+1)-.5
+sort(comp_grid_prob, decreasing = TRUE)
+```
+The model with the penaltization factors for competitive games also performed about the same as the model with all the data. Interestingly when only using data for competitive games, the only data point that remains is Hero Level.
+
+# Conclusion
+Given the extremely low predictive power of all the models created we should reject the idea that a prediction can be made for who will win a game based of individual characters played. This is not to say that there is not some combinations of characters that can be used to predict which players will win. This would require further testing, likely using association data techniques.
+
+Furthermore given that the effect of each character on a player's win probability droped to 0 when penalized for significants, we can conclude that a players skill, not chosen characters, is what will carry them to victory.
